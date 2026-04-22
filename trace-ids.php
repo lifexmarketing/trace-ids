@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:  Trace IDs
- * Description:  Captures GCLID from URL, stores in a cookie, and populates a Gravity Forms hidden field — resilient to page and object caching.
- * Version:      1.1.0
+ * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, and populates Gravity Forms hidden fields — resilient to page and object caching.
+ * Version:      1.2.0
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,36 +12,51 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.1.0' );
+define( 'TRACE_IDS_VERSION', '1.2.0' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
-// --- Settings helpers ---
+// --- Settings ---
 
-function trace_ids_defaults() {
+function trace_ids_tracker_defaults() {
     return [
-        'enabled'       => 1,
-        'cookie_expiry' => 90,
-        'gf_parameter'  => 'gclid',
-        'gf_css_class'  => 'gclid-field',
+        'gclid'  => [ 'enabled' => 1, 'param' => 'gclid',  'cookie_expiry' => 90, 'gf_css_class' => 'gclid-field'  ],
+        'fbclid' => [ 'enabled' => 1, 'param' => 'fbclid', 'cookie_expiry' => 90, 'gf_css_class' => 'fbclid-field' ],
     ];
 }
 
 function trace_ids_settings() {
-    return wp_parse_args( get_option( 'trace_ids_settings', [] ), trace_ids_defaults() );
+    $saved    = get_option( 'trace_ids_settings', [] );
+    $defaults = trace_ids_tracker_defaults();
+    foreach ( $defaults as $key => $default ) {
+        $saved[ $key ] = isset( $saved[ $key ] )
+            ? wp_parse_args( $saved[ $key ], $default )
+            : $default;
+    }
+    return $saved;
+}
+
+// Migrate flat v1.1.0 settings to the per-tracker array format.
+add_action( 'plugins_loaded', 'trace_ids_maybe_migrate' );
+function trace_ids_maybe_migrate() {
+    $saved = get_option( 'trace_ids_settings', [] );
+    if ( empty( $saved ) || ! isset( $saved['gf_parameter'] ) ) return;
+
+    $new           = trace_ids_tracker_defaults();
+    $new['gclid']  = [
+        'enabled'       => (int) ( $saved['enabled'] ?? 1 ),
+        'param'         => sanitize_key( $saved['gf_parameter'] ?? 'gclid' ),
+        'cookie_expiry' => absint( $saved['cookie_expiry'] ?? 90 ),
+        'gf_css_class'  => sanitize_html_class( $saved['gf_css_class'] ?? 'gclid-field' ),
+    ];
+    update_option( 'trace_ids_settings', $new );
 }
 
 // --- Admin page ---
 
 add_action( 'admin_menu', 'trace_ids_admin_menu' );
 function trace_ids_admin_menu() {
-    add_options_page(
-        'Trace IDs',
-        'Trace IDs',
-        'manage_options',
-        'trace-ids',
-        'trace_ids_settings_page'
-    );
+    add_options_page( 'Trace IDs', 'Trace IDs', 'manage_options', 'trace-ids', 'trace_ids_settings_page' );
 }
 
 add_action( 'admin_init', 'trace_ids_register_settings' );
@@ -49,82 +64,115 @@ function trace_ids_register_settings() {
     register_setting( 'trace_ids_options', 'trace_ids_settings', [
         'sanitize_callback' => 'trace_ids_sanitize',
     ] );
-
-    add_settings_section( 'trace_ids_main', '', '__return_null', 'trace-ids' );
-
-    add_settings_field( 'enabled',       'Enable GCLID tracking',             'trace_ids_field_enabled',       'trace-ids', 'trace_ids_main' );
-    add_settings_field( 'cookie_expiry', 'Cookie expiry',                     'trace_ids_field_cookie_expiry', 'trace-ids', 'trace_ids_main' );
-    add_settings_field( 'gf_parameter',  'GF dynamic population parameter',   'trace_ids_field_gf_parameter',  'trace-ids', 'trace_ids_main' );
-    add_settings_field( 'gf_css_class',  'GF field CSS class',                'trace_ids_field_gf_css_class',  'trace-ids', 'trace_ids_main' );
 }
 
 function trace_ids_sanitize( $input ) {
-    $d = trace_ids_defaults();
-    $expiry = absint( $input['cookie_expiry'] ?? $d['cookie_expiry'] );
-    return [
-        'enabled'       => ! empty( $input['enabled'] ) ? 1 : 0,
-        'cookie_expiry' => $expiry > 0 ? $expiry : $d['cookie_expiry'],
-        'gf_parameter'  => sanitize_key( $input['gf_parameter'] ?? $d['gf_parameter'] ) ?: $d['gf_parameter'],
-        'gf_css_class'  => sanitize_html_class( $input['gf_css_class'] ?? $d['gf_css_class'] ) ?: $d['gf_css_class'],
+    $defaults = trace_ids_tracker_defaults();
+    $output   = [];
+    foreach ( $defaults as $key => $default ) {
+        $raw    = $input[ $key ] ?? [];
+        $expiry = absint( $raw['cookie_expiry'] ?? $default['cookie_expiry'] );
+        $output[ $key ] = [
+            'enabled'       => ! empty( $raw['enabled'] ) ? 1 : 0,
+            'param'         => sanitize_key( $raw['param'] ?? $default['param'] ) ?: $default['param'],
+            'cookie_expiry' => $expiry > 0 ? $expiry : $default['cookie_expiry'],
+            'gf_css_class'  => sanitize_html_class( $raw['gf_css_class'] ?? $default['gf_css_class'] ) ?: $default['gf_css_class'],
+        ];
+    }
+    return $output;
+}
+
+function trace_ids_settings_page() {
+    $s       = trace_ids_settings();
+    $labels  = [
+        'gclid'  => 'GCLID <span style="font-weight:normal;color:#646970;">(Google Ads)</span>',
+        'fbclid' => 'fbclid <span style="font-weight:normal;color:#646970;">(Facebook / Meta)</span>',
     ];
-}
+    ?>
+    <div class="wrap">
+        <h1>Trace IDs</h1>
+        <form method="post" action="options.php">
+            <?php settings_fields( 'trace_ids_options' ); ?>
 
-function trace_ids_field_enabled() {
-    $s = trace_ids_settings();
-    echo '<label><input type="checkbox" name="trace_ids_settings[enabled]" value="1"' . checked( 1, $s['enabled'], false ) . '> Active</label>';
-}
+            <?php foreach ( $labels as $key => $label ) :
+                $t = $s[ $key ];
+            ?>
+            <h2><?php echo $label; ?></h2>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row">Enable</th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="trace_ids_settings[<?php echo $key; ?>][enabled]" value="1" <?php checked( 1, $t['enabled'] ); ?>>
+                            Active
+                        </label>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Cookie expiry</th>
+                    <td>
+                        <input type="number" name="trace_ids_settings[<?php echo $key; ?>][cookie_expiry]" value="<?php echo esc_attr( $t['cookie_expiry'] ); ?>" min="1" max="365" class="small-text"> days
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">GF parameter name</th>
+                    <td>
+                        <input type="text" name="trace_ids_settings[<?php echo $key; ?>][param]" value="<?php echo esc_attr( $t['param'] ); ?>" class="regular-text">
+                        <p class="description">Matches the <strong>Allow field to be populated dynamically</strong> parameter name on your GF hidden field. Also used as the cookie name.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">GF field CSS class</th>
+                    <td>
+                        <input type="text" name="trace_ids_settings[<?php echo $key; ?>][gf_css_class]" value="<?php echo esc_attr( $t['gf_css_class'] ); ?>" class="regular-text">
+                        <p class="description">Custom CSS class added to the GF hidden field under <strong>Appearance &rsaquo; Custom CSS Class</strong>.</p>
+                    </td>
+                </tr>
+            </table>
+            <?php endforeach; ?>
 
-function trace_ids_field_cookie_expiry() {
-    $s = trace_ids_settings();
-    echo '<input type="number" name="trace_ids_settings[cookie_expiry]" value="' . esc_attr( $s['cookie_expiry'] ) . '" min="1" max="365" class="small-text"> days';
+            <?php submit_button(); ?>
+        </form>
+    </div>
+    <?php
 }
-
-function trace_ids_field_gf_parameter() {
-    $s = trace_ids_settings();
-    echo '<input type="text" name="trace_ids_settings[gf_parameter]" value="' . esc_attr( $s['gf_parameter'] ) . '" class="regular-text">';
-    echo '<p class="description">Must match the <strong>Allow field to be populated dynamically</strong> parameter name on your GF hidden field.</p>';
-}
-
-function trace_ids_field_gf_css_class() {
-    $s = trace_ids_settings();
-    echo '<input type="text" name="trace_ids_settings[gf_css_class]" value="' . esc_attr( $s['gf_css_class'] ) . '" class="regular-text">';
-    echo '<p class="description">Must match the custom CSS class added to your GF hidden field under <strong>Appearance &rsaquo; Custom CSS Class</strong>.</p>';
-}
-
-function trace_ids_settings_page() { ?>
-<div class="wrap">
-    <h1>Trace IDs</h1>
-    <form method="post" action="options.php">
-        <?php
-        settings_fields( 'trace_ids_options' );
-        do_settings_sections( 'trace-ids' );
-        submit_button();
-        ?>
-    </form>
-</div>
-<?php }
 
 // --- Core functionality ---
 
 add_action( 'init', 'trace_ids_init' );
 function trace_ids_init() {
-    $s = trace_ids_settings();
-    if ( ! $s['enabled'] ) return;
+    $s        = trace_ids_settings();
+    $enabled  = array_filter( $s, fn( $t ) => ! empty( $t['enabled'] ) );
+    if ( empty( $enabled ) ) return;
 
     if ( ! is_admin() ) {
         add_action( 'wp_head', 'trace_ids_script', 1 );
     }
-    add_filter( 'gform_field_value_' . $s['gf_parameter'], 'trace_ids_php_fallback' );
+    foreach ( $enabled as $tracker ) {
+        $param = $tracker['param'];
+        add_filter( "gform_field_value_{$param}", function () use ( $param ) {
+            return isset( $_COOKIE[ $param ] ) ? sanitize_text_field( $_COOKIE[ $param ] ) : '';
+        } );
+    }
 }
 
 function trace_ids_script() {
-    $s      = trace_ids_settings();
-    $expiry = (int) $s['cookie_expiry'];
-    $param  = esc_js( $s['gf_parameter'] );
-    $class  = esc_js( $s['gf_css_class'] );
+    $s       = trace_ids_settings();
+    $active  = [];
+    foreach ( $s as $tracker ) {
+        if ( ! empty( $tracker['enabled'] ) ) {
+            $active[] = [
+                'param'    => $tracker['param'],
+                'expiry'   => (int) $tracker['cookie_expiry'],
+                'cssClass' => $tracker['gf_css_class'],
+            ];
+        }
+    }
+    if ( empty( $active ) ) return;
     ?>
 <script>
 (function () {
+    var trackers = <?php echo wp_json_encode( $active ); ?>;
     function getParam(name) {
         var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
         return m ? decodeURIComponent(m[1]) : null;
@@ -137,13 +185,17 @@ function trace_ids_script() {
         var exp = new Date(Date.now() + days * 864e5).toUTCString();
         document.cookie = name + '=' + val + '; expires=' + exp + '; path=/; SameSite=Lax';
     }
-    var val = getParam('<?php echo $param; ?>');
-    if (val) setCookie('<?php echo $param; ?>', val, <?php echo $expiry; ?>);
+    trackers.forEach(function (t) {
+        var val = getParam(t.param);
+        if (val) setCookie(t.param, val, t.expiry);
+    });
     function populate() {
-        var stored = getCookie('<?php echo $param; ?>');
-        if (!stored) return;
-        document.querySelectorAll('.<?php echo $class; ?> input').forEach(function (el) {
-            el.value = stored;
+        trackers.forEach(function (t) {
+            var stored = getCookie(t.param);
+            if (!stored) return;
+            document.querySelectorAll('.' + t.cssClass + ' input').forEach(function (el) {
+                el.value = stored;
+            });
         });
     }
     document.addEventListener('DOMContentLoaded', populate);
@@ -151,11 +203,6 @@ function trace_ids_script() {
 })();
 </script>
     <?php
-}
-
-function trace_ids_php_fallback() {
-    $param = trace_ids_settings()['gf_parameter'];
-    return isset( $_COOKIE[ $param ] ) ? sanitize_text_field( $_COOKIE[ $param ] ) : '';
 }
 
 // --- GitHub updater ---
