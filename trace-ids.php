@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:  Trace IDs
- * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, and populates Gravity Forms hidden fields — resilient to page and object caching.
- * Version:      1.3.0
+ * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
+ * Version:      1.4.0
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.3.0' );
+define( 'TRACE_IDS_VERSION', '1.4.0' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
@@ -33,6 +33,7 @@ function trace_ids_settings() {
             ? wp_parse_args( $saved[ $key ], $default )
             : $default;
     }
+    $saved['highlevel'] = wp_parse_args( $saved['highlevel'] ?? [], [ 'enabled' => 0 ] );
     return $saved;
 }
 
@@ -40,22 +41,15 @@ function trace_ids_settings() {
 add_action( 'plugins_loaded', 'trace_ids_maybe_migrate' );
 function trace_ids_maybe_migrate() {
     $saved = get_option( 'trace_ids_settings', [] );
-    if ( empty( $saved ) ) return;
+    if ( empty( $saved ) || ! isset( $saved['gf_parameter'] ) ) return;
 
-    // v1.1.0 flat format
-    if ( isset( $saved['gf_parameter'] ) ) {
-        $new          = trace_ids_tracker_defaults();
-        $new['gclid'] = [
-            'enabled'       => (int) ( $saved['enabled'] ?? 1 ),
-            'param'         => sanitize_key( $saved['gf_parameter'] ?? 'gclid' ),
-            'cookie_expiry' => absint( $saved['cookie_expiry'] ?? 90 ),
-        ];
-        update_option( 'trace_ids_settings', $new );
-        return;
-    }
-
-    // v1.2.0 per-tracker format with gf_css_class — strip that key on next save,
-    // but no immediate update needed; sanitize() drops it naturally on next settings save.
+    $new          = trace_ids_tracker_defaults();
+    $new['gclid'] = [
+        'enabled'       => (int) ( $saved['enabled'] ?? 1 ),
+        'param'         => sanitize_key( $saved['gf_parameter'] ?? 'gclid' ),
+        'cookie_expiry' => absint( $saved['cookie_expiry'] ?? 90 ),
+    ];
+    update_option( 'trace_ids_settings', $new );
 }
 
 // --- Admin page ---
@@ -84,6 +78,7 @@ function trace_ids_sanitize( $input ) {
             'cookie_expiry' => $expiry > 0 ? $expiry : $default['cookie_expiry'],
         ];
     }
+    $output['highlevel'] = [ 'enabled' => ! empty( $input['highlevel']['enabled'] ) ? 1 : 0 ];
     return $output;
 }
 
@@ -99,10 +94,12 @@ function trace_ids_settings_page() {
         <form method="post" action="options.php">
             <?php settings_fields( 'trace_ids_options' ); ?>
 
+            <h2>Gravity Forms</h2>
+
             <?php foreach ( $labels as $key => $label ) :
                 $t = $s[ $key ];
             ?>
-            <h2><?php echo $label; ?></h2>
+            <h3><?php echo $label; ?></h3>
             <table class="form-table" role="presentation">
                 <tr>
                     <th scope="row">Enable</th>
@@ -129,6 +126,20 @@ function trace_ids_settings_page() {
             </table>
             <?php endforeach; ?>
 
+            <h2>HighLevel Iframes</h2>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row">Enable</th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="trace_ids_settings[highlevel][enabled]" value="1" <?php checked( 1, $s['highlevel']['enabled'] ); ?>>
+                            Active
+                        </label>
+                        <p class="description">Appends tracked parameters to HighLevel iframe URLs on page load. Detects iframes from <code>gohighlevel.com</code>, <code>leadconnectorhq.com</code>, and <code>msgsndr.com</code>. Compatible with WP Rocket's lazy load.</p>
+                    </td>
+                </tr>
+            </table>
+
             <?php submit_button(); ?>
         </form>
     </div>
@@ -140,15 +151,17 @@ function trace_ids_settings_page() {
 add_action( 'init', 'trace_ids_init' );
 function trace_ids_init() {
     $s       = trace_ids_settings();
-    $enabled = array_filter( $s, fn( $t ) => ! empty( $t['enabled'] ) );
+    $enabled = array_filter(
+        $s,
+        fn( $t, $k ) => $k !== 'highlevel' && ! empty( $t['enabled'] ),
+        ARRAY_FILTER_USE_BOTH
+    );
     if ( empty( $enabled ) ) return;
 
     if ( ! is_admin() ) {
         add_action( 'wp_head', 'trace_ids_script', 1 );
     }
 
-    // Inject data-trace-param onto matching GF hidden fields so JS can find them
-    // without requiring a CSS class. The attribute is baked into cached HTML.
     add_filter( 'gform_field_content', 'trace_ids_inject_data_attr', 10, 2 );
 
     foreach ( $enabled as $tracker ) {
@@ -163,7 +176,11 @@ function trace_ids_inject_data_attr( $content, $field ) {
     if ( empty( $field->inputName ) ) return $content;
 
     $s      = trace_ids_settings();
-    $params = array_column( array_values( $s ), 'param' );
+    $params = array_column( array_values( array_filter(
+        $s,
+        fn( $k ) => $k !== 'highlevel',
+        ARRAY_FILTER_USE_KEY
+    ) ), 'param' );
     if ( ! in_array( $field->inputName, $params, true ) ) return $content;
 
     return preg_replace(
@@ -176,13 +193,12 @@ function trace_ids_inject_data_attr( $content, $field ) {
 
 function trace_ids_script() {
     $s      = trace_ids_settings();
+    $hl     = $s['highlevel'];
     $active = [];
-    foreach ( $s as $tracker ) {
+    foreach ( $s as $key => $tracker ) {
+        if ( $key === 'highlevel' ) continue;
         if ( ! empty( $tracker['enabled'] ) ) {
-            $active[] = [
-                'param'  => $tracker['param'],
-                'expiry' => (int) $tracker['cookie_expiry'],
-            ];
+            $active[] = [ 'param' => $tracker['param'], 'expiry' => (int) $tracker['cookie_expiry'] ];
         }
     }
     if ( empty( $active ) ) return;
@@ -190,6 +206,7 @@ function trace_ids_script() {
 <script>
 (function () {
     var trackers = <?php echo wp_json_encode( $active ); ?>;
+
     function getParam(name) {
         var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
         return m ? decodeURIComponent(m[1]) : null;
@@ -202,11 +219,15 @@ function trace_ids_script() {
         var exp = new Date(Date.now() + days * 864e5).toUTCString();
         document.cookie = name + '=' + val + '; expires=' + exp + '; path=/; SameSite=Lax';
     }
+
+    // Capture URL params into cookies
     trackers.forEach(function (t) {
         var val = getParam(t.param);
         if (val) setCookie(t.param, val, t.expiry);
     });
-    function populate() {
+
+    // Populate Gravity Forms hidden fields
+    function populateGF() {
         trackers.forEach(function (t) {
             var stored = getCookie(t.param);
             if (!stored) return;
@@ -215,8 +236,69 @@ function trace_ids_script() {
             });
         });
     }
-    document.addEventListener('DOMContentLoaded', populate);
-    document.addEventListener('gform_post_render', populate);
+    document.addEventListener('DOMContentLoaded', populateGF);
+    document.addEventListener('gform_post_render', populateGF);
+
+<?php if ( ! empty( $hl['enabled'] ) ) : ?>
+    // Append tracked params to HighLevel iframes.
+    // Checks src, data-lazy-src (WP Rocket), and data-src so lazy-loaded
+    // iframes are handled before WP Rocket swaps the attribute to src.
+    var HL_DOMAINS = ['gohighlevel.com', 'leadconnectorhq.com', 'msgsndr.com'];
+
+    function isHLSrc(src) {
+        if (!src || src === 'about:blank') return false;
+        try {
+            var host = new URL(src).hostname;
+            return HL_DOMAINS.some(function (d) {
+                return host === d || host.slice(-(d.length + 1)) === '.' + d;
+            });
+        } catch (e) { return false; }
+    }
+
+    function getHLAttr(el) {
+        var src = el.getAttribute('src');
+        if (isHLSrc(src)) return 'src';
+        var lazy = el.getAttribute('data-lazy-src');
+        if (isHLSrc(lazy)) return 'data-lazy-src';
+        var ds = el.getAttribute('data-src');
+        if (isHLSrc(ds)) return 'data-src';
+        return null;
+    }
+
+    function injectHL(el) {
+        if (el.tagName !== 'IFRAME') return;
+        var attr = getHLAttr(el);
+        if (!attr) return;
+        var src  = el.getAttribute(attr);
+        var parts = [];
+        trackers.forEach(function (t) {
+            if (src.indexOf(t.param + '=') !== -1) return;
+            var val = getCookie(t.param);
+            if (val) parts.push(encodeURIComponent(t.param) + '=' + encodeURIComponent(val));
+        });
+        if (!parts.length) return;
+        el.setAttribute(attr, src + (src.indexOf('?') !== -1 ? '&' : '?') + parts.join('&'));
+    }
+
+    function processHL() {
+        document.querySelectorAll('iframe').forEach(injectHL);
+    }
+
+    document.addEventListener('DOMContentLoaded', processHL);
+
+    // Catch iframes injected after page load (page builders, lazy rendering)
+    var hlObserver = new MutationObserver(function (mutations) {
+        mutations.forEach(function (m) {
+            m.addedNodes.forEach(function (node) {
+                if (node.nodeType !== 1) return;
+                if (node.tagName === 'IFRAME') { injectHL(node); return; }
+                if (node.querySelectorAll) node.querySelectorAll('iframe').forEach(injectHL);
+            });
+        });
+    });
+    hlObserver.observe(document.documentElement, { childList: true, subtree: true });
+<?php endif; ?>
+
 })();
 </script>
     <?php
