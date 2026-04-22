@@ -1,0 +1,25 @@
+name: Release plugin zip
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build plugin zip
+        run: |
+          mkdir -p build/trace-ids
+          cp trace-ids.php build/trace-ids/
+          cd build
+          zip -r trace-ids.zip trace-ids/
+
+      - name: Upload zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/trace-ids.zip
