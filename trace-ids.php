@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Trace IDs
  * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
- * Version:      1.4.0
+ * Version:      1.5.0
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.4.0' );
+define( 'TRACE_IDS_VERSION', '1.5.0' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
@@ -21,7 +21,7 @@ define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 function trace_ids_tracker_defaults() {
     return [
         'gclid'  => [ 'enabled' => 1, 'param' => 'gclid',  'cookie_expiry' => 90 ],
-        'fbclid' => [ 'enabled' => 1, 'param' => 'fbclid', 'cookie_expiry' => 90 ],
+        'fbclid' => [ 'enabled' => 0, 'param' => 'fbclid', 'cookie_expiry' => 90 ],
     ];
 }
 
@@ -59,6 +59,13 @@ function trace_ids_admin_menu() {
     add_options_page( 'Trace IDs', 'Trace IDs', 'manage_options', 'trace-ids', 'trace_ids_settings_page' );
 }
 
+add_filter( 'plugin_action_links_' . TRACE_IDS_PLUGIN_FILE, 'trace_ids_plugin_action_links' );
+function trace_ids_plugin_action_links( $links ) {
+    $settings_link = '<a href="' . esc_url( admin_url( 'options-general.php?page=trace-ids' ) ) . '">Settings</a>';
+    array_unshift( $links, $settings_link );
+    return $links;
+}
+
 add_action( 'admin_init', 'trace_ids_register_settings' );
 function trace_ids_register_settings() {
     register_setting( 'trace_ids_options', 'trace_ids_settings', [
@@ -91,6 +98,9 @@ function trace_ids_settings_page() {
     ?>
     <div class="wrap">
         <h1>Trace IDs</h1>
+
+        <?php trace_ids_render_gf_notice(); ?>
+
         <form method="post" action="options.php">
             <?php settings_fields( 'trace_ids_options' ); ?>
 
@@ -142,8 +152,248 @@ function trace_ids_settings_page() {
 
             <?php submit_button(); ?>
         </form>
+
+        <hr>
+
+        <h2>Gravity Forms Maintenance</h2>
+        <?php trace_ids_render_gf_maintenance(); ?>
     </div>
     <?php
+}
+
+function trace_ids_render_gf_notice() {
+    if ( ! isset( $_GET['trace_ids_notice'] ) ) return;
+
+    $count  = isset( $_GET['count'] ) ? absint( $_GET['count'] ) : 0;
+    $notice = sanitize_key( wp_unslash( $_GET['trace_ids_notice'] ) );
+
+    if ( $notice === 'added_gclid' ) {
+        $message = $count === 1
+            ? 'Added a gclid field to 1 form.'
+            : "Added a gclid field to {$count} forms.";
+    } elseif ( $notice === 'added_fbclid' ) {
+        $message = $count === 1
+            ? 'Added an fbclid field to 1 form.'
+            : "Added an fbclid field to {$count} forms.";
+    } elseif ( $notice === 'converted' ) {
+        $message = $count === 1
+            ? 'Converted the HandL gclid field on 1 form.'
+            : "Converted the HandL gclid field on {$count} forms.";
+    } else {
+        return;
+    }
+    ?>
+    <div class="notice notice-success is-dismissible"><p><?php echo esc_html( $message ); ?></p></div>
+    <?php
+}
+
+function trace_ids_render_gf_maintenance() {
+    $gf = trace_ids_gf_status();
+
+    if ( ! $gf['available'] ) {
+        echo '<p>Gravity Forms is not active.</p>';
+        return;
+    }
+    ?>
+    <p>
+        <?php if ( $gf['missing']['gclid'] > 0 ) : ?>
+            <?php echo esc_html( $gf['missing']['gclid'] ); ?> form(s) do not have a gclid field yet.
+        <?php else : ?>
+            All forms already have a gclid field.
+        <?php endif; ?>
+    </p>
+
+    <?php if ( $gf['missing']['gclid'] > 0 ) : ?>
+    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-bottom:1.5em;">
+        <?php wp_nonce_field( 'trace_ids_gf_action' ); ?>
+        <input type="hidden" name="action" value="trace_ids_add_gclid_fields">
+        <?php submit_button( 'Add gclid field to all forms', 'secondary', 'submit', false ); ?>
+    </form>
+    <?php endif; ?>
+
+    <p>
+        <?php if ( $gf['missing']['fbclid'] > 0 ) : ?>
+            <?php echo esc_html( $gf['missing']['fbclid'] ); ?> form(s) do not have an fbclid field yet.
+        <?php else : ?>
+            All forms already have an fbclid field.
+        <?php endif; ?>
+    </p>
+
+    <?php if ( $gf['missing']['fbclid'] > 0 ) : ?>
+    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-bottom:1.5em;">
+        <?php wp_nonce_field( 'trace_ids_gf_action' ); ?>
+        <input type="hidden" name="action" value="trace_ids_add_fbclid_fields">
+        <?php submit_button( 'Add fbclid field to all forms', 'secondary', 'submit', false ); ?>
+    </form>
+    <?php endif; ?>
+
+    <?php if ( $gf['handl_forms'] > 0 ) : ?>
+    <div class="notice notice-warning inline">
+        <p>
+            Found <?php echo esc_html( $gf['handl_fields'] ); ?> gclid field(s) on <?php echo esc_html( $gf['handl_forms'] ); ?> form(s) created by the HandL UTM Grabber plugin.
+            These use a legacy field type and won't populate correctly.
+        </p>
+    </div>
+    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+        <?php wp_nonce_field( 'trace_ids_gf_action' ); ?>
+        <input type="hidden" name="action" value="trace_ids_convert_handl_fields">
+        <?php submit_button( 'Convert HandL gclid fields to standard hidden fields', 'secondary', 'submit', false ); ?>
+    </form>
+    <?php endif; ?>
+    <?php
+}
+
+// --- Gravity Forms field management ---
+
+function trace_ids_gf_available() {
+    return class_exists( 'GFAPI' ) && class_exists( 'GF_Fields' );
+}
+
+function trace_ids_field_is_handl( $field ) {
+    // Older HandL Free versions registered a custom GF field type.
+    if ( strpos( (string) $field->type, 'handlfree_' ) === 0 ) return true;
+    if ( ! empty( $field->inputType ) && strpos( (string) $field->inputType, 'handlfree_' ) === 0 ) return true;
+
+    // Current HandL UTM Grabber: a standard "hidden" field, but labeled
+    // "HandL ( param )" and left with a stray, empty inputType property.
+    if ( preg_match( '/^HandL\s*\(/i', (string) $field->label ) ) return true;
+
+    return false;
+}
+
+function trace_ids_gf_status() {
+    $status = [
+        'available'    => trace_ids_gf_available(),
+        'missing'      => [ 'gclid' => 0, 'fbclid' => 0 ],
+        'handl_forms'  => 0,
+        'handl_fields' => 0,
+    ];
+    if ( ! $status['available'] ) return $status;
+
+    $s      = trace_ids_settings();
+    $params = [ 'gclid' => $s['gclid']['param'], 'fbclid' => $s['fbclid']['param'] ];
+
+    foreach ( GFAPI::get_forms() as $form ) {
+        $has_param      = [ 'gclid' => false, 'fbclid' => false ];
+        $form_has_handl = false;
+
+        foreach ( $form['fields'] as $field ) {
+            if ( empty( $field->inputName ) ) continue;
+
+            foreach ( $params as $key => $param ) {
+                if ( $field->inputName !== $param ) continue;
+                $has_param[ $key ] = true;
+                if ( $key === 'gclid' && trace_ids_field_is_handl( $field ) ) {
+                    $form_has_handl = true;
+                    $status['handl_fields']++;
+                }
+            }
+        }
+
+        foreach ( $params as $key => $param ) {
+            if ( ! $has_param[ $key ] ) $status['missing'][ $key ]++;
+        }
+        if ( $form_has_handl ) $status['handl_forms']++;
+    }
+    return $status;
+}
+
+function trace_ids_add_missing_tracker_fields( $tracker_key ) {
+    if ( ! trace_ids_gf_available() ) return 0;
+
+    $param   = trace_ids_settings()[ $tracker_key ]['param'];
+    $updated = 0;
+
+    foreach ( GFAPI::get_forms() as $form ) {
+        $has_param = false;
+        foreach ( $form['fields'] as $field ) {
+            if ( ! empty( $field->inputName ) && $field->inputName === $param ) {
+                $has_param = true;
+                break;
+            }
+        }
+        if ( $has_param ) continue;
+
+        $next_id = class_exists( 'GFFormsModel' )
+            ? GFFormsModel::get_next_field_id( $form['fields'] )
+            : ( (int) array_reduce( $form['fields'], fn( $max, $f ) => max( $max, (int) $f->id ), 0 ) + 1 );
+
+        $form['fields'][] = GF_Fields::create( [
+            'type'              => 'hidden',
+            'id'                => $next_id,
+            'formId'            => $form['id'],
+            'label'             => $param,
+            'inputName'         => $param,
+            'allowsPrepopulate' => true,
+        ] );
+
+        GFAPI::update_form( $form );
+        $updated++;
+    }
+    return $updated;
+}
+
+function trace_ids_convert_handl_gclid_fields() {
+    if ( ! trace_ids_gf_available() ) return 0;
+
+    $param   = trace_ids_settings()['gclid']['param'];
+    $updated = 0;
+
+    foreach ( GFAPI::get_forms() as $form ) {
+        $changed = false;
+
+        foreach ( $form['fields'] as $field ) {
+            if ( empty( $field->inputName ) || $field->inputName !== $param ) continue;
+            if ( ! trace_ids_field_is_handl( $field ) ) continue;
+
+            $field->type              = 'hidden';
+            $field->label             = $param;
+            $field->allowsPrepopulate = true;
+            if ( isset( $field->inputType ) ) unset( $field->inputType );
+            $changed = true;
+        }
+
+        if ( $changed ) {
+            GFAPI::update_form( $form );
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+add_action( 'admin_post_trace_ids_add_gclid_fields', 'trace_ids_handle_add_gclid_fields' );
+function trace_ids_handle_add_gclid_fields() {
+    trace_ids_handle_add_tracker_fields( 'gclid' );
+}
+
+add_action( 'admin_post_trace_ids_add_fbclid_fields', 'trace_ids_handle_add_fbclid_fields' );
+function trace_ids_handle_add_fbclid_fields() {
+    trace_ids_handle_add_tracker_fields( 'fbclid' );
+}
+
+function trace_ids_handle_add_tracker_fields( $tracker_key ) {
+    if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized', 403 );
+    check_admin_referer( 'trace_ids_gf_action' );
+
+    $updated = trace_ids_add_missing_tracker_fields( $tracker_key );
+    wp_safe_redirect( add_query_arg(
+        [ 'page' => 'trace-ids', 'trace_ids_notice' => 'added_' . $tracker_key, 'count' => $updated ],
+        admin_url( 'options-general.php' )
+    ) );
+    exit;
+}
+
+add_action( 'admin_post_trace_ids_convert_handl_fields', 'trace_ids_handle_convert_handl_fields' );
+function trace_ids_handle_convert_handl_fields() {
+    if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized', 403 );
+    check_admin_referer( 'trace_ids_gf_action' );
+
+    $updated = trace_ids_convert_handl_gclid_fields();
+    wp_safe_redirect( add_query_arg(
+        [ 'page' => 'trace-ids', 'trace_ids_notice' => 'converted', 'count' => $updated ],
+        admin_url( 'options-general.php' )
+    ) );
+    exit;
 }
 
 // --- Core functionality ---
