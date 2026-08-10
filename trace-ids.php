@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Trace IDs
  * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
- * Version:      1.5.0
+ * Version:      1.5.1
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.5.0' );
+define( 'TRACE_IDS_VERSION', '1.5.1' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
@@ -589,6 +589,7 @@ function trace_ids_check_update( $update, $plugin_data, $plugin_file, $locales )
         'id'           => 'github.com/' . TRACE_IDS_REPO,
         'slug'         => 'trace-ids',
         'plugin'       => $plugin_file,
+        'version'      => $latest,
         'new_version'  => $latest,
         'url'          => 'https://github.com/' . TRACE_IDS_REPO,
         'package'      => $zip_url,
