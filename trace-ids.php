@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Trace IDs
  * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
- * Version:      1.5.1
+ * Version:      1.5.2
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.5.1' );
+define( 'TRACE_IDS_VERSION', '1.5.2' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
@@ -177,8 +177,8 @@ function trace_ids_render_gf_notice() {
             : "Added an fbclid field to {$count} forms.";
     } elseif ( $notice === 'converted' ) {
         $message = $count === 1
-            ? 'Converted the HandL gclid field on 1 form.'
-            : "Converted the HandL gclid field on {$count} forms.";
+            ? 'Converted the HandL click ID field(s) on 1 form.'
+            : "Converted the HandL click ID field(s) on {$count} forms.";
     } else {
         return;
     }
@@ -230,14 +230,14 @@ function trace_ids_render_gf_maintenance() {
     <?php if ( $gf['handl_forms'] > 0 ) : ?>
     <div class="notice notice-warning inline">
         <p>
-            Found <?php echo esc_html( $gf['handl_fields'] ); ?> gclid field(s) on <?php echo esc_html( $gf['handl_forms'] ); ?> form(s) created by the HandL UTM Grabber plugin.
+            Found <?php echo esc_html( $gf['handl_fields'] ); ?> click ID field(s) (gclid/fbclid) on <?php echo esc_html( $gf['handl_forms'] ); ?> form(s) created by the HandL UTM Grabber plugin.
             These use a legacy field type and won't populate correctly.
         </p>
     </div>
     <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
         <?php wp_nonce_field( 'trace_ids_gf_action' ); ?>
         <input type="hidden" name="action" value="trace_ids_convert_handl_fields">
-        <?php submit_button( 'Convert HandL gclid fields to standard hidden fields', 'secondary', 'submit', false ); ?>
+        <?php submit_button( 'Convert HandL click ID fields to standard hidden fields', 'secondary', 'submit', false ); ?>
     </form>
     <?php endif; ?>
     <?php
@@ -283,7 +283,7 @@ function trace_ids_gf_status() {
             foreach ( $params as $key => $param ) {
                 if ( $field->inputName !== $param ) continue;
                 $has_param[ $key ] = true;
-                if ( $key === 'gclid' && trace_ids_field_is_handl( $field ) ) {
+                if ( trace_ids_field_is_handl( $field ) ) {
                     $form_has_handl = true;
                     $status['handl_fields']++;
                 }
@@ -333,21 +333,22 @@ function trace_ids_add_missing_tracker_fields( $tracker_key ) {
     return $updated;
 }
 
-function trace_ids_convert_handl_gclid_fields() {
+function trace_ids_convert_handl_fields() {
     if ( ! trace_ids_gf_available() ) return 0;
 
-    $param   = trace_ids_settings()['gclid']['param'];
+    $s       = trace_ids_settings();
+    $params  = [ $s['gclid']['param'], $s['fbclid']['param'] ];
     $updated = 0;
 
     foreach ( GFAPI::get_forms() as $form ) {
         $changed = false;
 
         foreach ( $form['fields'] as $field ) {
-            if ( empty( $field->inputName ) || $field->inputName !== $param ) continue;
+            if ( empty( $field->inputName ) || ! in_array( $field->inputName, $params, true ) ) continue;
             if ( ! trace_ids_field_is_handl( $field ) ) continue;
 
             $field->type              = 'hidden';
-            $field->label             = $param;
+            $field->label             = $field->inputName;
             $field->allowsPrepopulate = true;
             if ( isset( $field->inputType ) ) unset( $field->inputType );
             $changed = true;
@@ -388,7 +389,7 @@ function trace_ids_handle_convert_handl_fields() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized', 403 );
     check_admin_referer( 'trace_ids_gf_action' );
 
-    $updated = trace_ids_convert_handl_gclid_fields();
+    $updated = trace_ids_convert_handl_fields();
     wp_safe_redirect( add_query_arg(
         [ 'page' => 'trace-ids', 'trace_ids_notice' => 'converted', 'count' => $updated ],
         admin_url( 'options-general.php' )
