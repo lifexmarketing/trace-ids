@@ -480,9 +480,9 @@ function trace_ids_script() {
     // Populate Gravity Forms hidden fields
     function populateGF() {
         trackers.forEach(function (t) {
-            var stored = getCookie(t.param);
-            if (!stored) return;
+            var stored = getCookie(t.param) || '';
             document.querySelectorAll('input[data-trace-param="' + t.param + '"]').forEach(function (el) {
+                // Clear cached server-rendered values when this visitor has no cookie.
                 el.value = stored;
             });
         });
