@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Trace IDs
  * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
- * Version:      1.5.2
+ * Version:      1.5.3
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.5.2' );
+define( 'TRACE_IDS_VERSION', '1.5.3' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
 
@@ -414,12 +414,49 @@ function trace_ids_init() {
     }
 
     add_filter( 'gform_field_content', 'trace_ids_inject_data_attr', 10, 2 );
+    add_action( 'gform_pre_submission', 'trace_ids_fill_from_cookies' );
 
+    // Rendered HTML may be page-cached and served to other visitors, so never
+    // render a per-visitor value (from cookie or query string) into the field.
+    // The browser script fills it in, and trace_ids_fill_from_cookies() covers
+    // submissions where the script didn't run.
     foreach ( $enabled as $tracker ) {
-        $param = $tracker['param'];
-        add_filter( "gform_field_value_{$param}", function () use ( $param ) {
-            return isset( $_COOKIE[ $param ] ) ? sanitize_text_field( $_COOKIE[ $param ] ) : '';
-        } );
+        add_filter( "gform_field_value_{$tracker['param']}", '__return_empty_string' );
+    }
+}
+
+function trace_ids_cookie_name( $param ) {
+    return 'tid_' . $param;
+}
+
+function trace_ids_cookie_value( $param ) {
+    // Fall back to the pre-1.5.3 unprefixed cookie until those expire.
+    foreach ( [ trace_ids_cookie_name( $param ), $param ] as $name ) {
+        if ( ! empty( $_COOKIE[ $name ] ) ) {
+            return sanitize_text_field( wp_unslash( $_COOKIE[ $name ] ) );
+        }
+    }
+    return '';
+}
+
+// Submissions are never page-cached, so the submitter's own cookies are safe
+// to read here. Only fills fields the browser script left empty.
+function trace_ids_fill_from_cookies( $form ) {
+    $s      = trace_ids_settings();
+    $params = [];
+    foreach ( $s as $key => $tracker ) {
+        if ( $key === 'highlevel' || empty( $tracker['enabled'] ) ) continue;
+        $params[] = $tracker['param'];
+    }
+
+    foreach ( $form['fields'] as $field ) {
+        if ( empty( $field->inputName ) || ! in_array( $field->inputName, $params, true ) ) continue;
+
+        $input = 'input_' . $field->id;
+        if ( isset( $_POST[ $input ] ) && $_POST[ $input ] !== '' ) continue;
+
+        $value = trace_ids_cookie_value( $field->inputName );
+        if ( $value !== '' ) $_POST[ $input ] = $value;
     }
 }
 
@@ -449,7 +486,11 @@ function trace_ids_script() {
     foreach ( $s as $key => $tracker ) {
         if ( $key === 'highlevel' ) continue;
         if ( ! empty( $tracker['enabled'] ) ) {
-            $active[] = [ 'param' => $tracker['param'], 'expiry' => (int) $tracker['cookie_expiry'] ];
+            $active[] = [
+                'param'  => $tracker['param'],
+                'cookie' => trace_ids_cookie_name( $tracker['param'] ),
+                'expiry' => (int) $tracker['cookie_expiry'],
+            ];
         }
     }
     if ( empty( $active ) ) return;
@@ -458,37 +499,56 @@ function trace_ids_script() {
 (function () {
     var trackers = <?php echo wp_json_encode( $active ); ?>;
 
-    function getParam(name) {
-        var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
-        return m ? decodeURIComponent(m[1]) : null;
+    // A malformed %-sequence must not throw and halt the whole script.
+    function safeDecode(s) {
+        try { return decodeURIComponent(s); } catch (e) { return s; }
     }
-    function getCookie(name) {
+    function getParam(name) {
+        var m = new RegExp('[?&]' + name + '=([^&#]*)').exec(location.search);
+        return m ? safeDecode(m[1].replace(/\+/g, ' ')) : null;
+    }
+    function readCookie(name) {
         var m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
-        return m ? m[m.length - 1] : null;
+        return m ? safeDecode(m[m.length - 1]) : null;
+    }
+    // Falls back to the pre-1.5.3 unprefixed cookie until those expire.
+    function getCookie(t) {
+        return readCookie(t.cookie) || readCookie(t.param);
     }
     function setCookie(name, val, days) {
         var exp = new Date(Date.now() + days * 864e5).toUTCString();
-        document.cookie = name + '=' + val + '; expires=' + exp + '; path=/; SameSite=Lax';
+        document.cookie = name + '=' + encodeURIComponent(val) + '; expires=' + exp + '; path=/; SameSite=Lax';
+    }
+    // This script may run after DOMContentLoaded (e.g. WP Rocket's Delay JS).
+    function onReady(fn) {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+        else fn();
     }
 
     // Capture URL params into cookies
     trackers.forEach(function (t) {
         var val = getParam(t.param);
-        if (val) setCookie(t.param, val, t.expiry);
+        if (val) setCookie(t.cookie, val, t.expiry);
     });
 
-    // Populate Gravity Forms hidden fields
+    // Populate Gravity Forms hidden fields. Always writes, even when empty, so
+    // a value baked into cached HTML is never submitted by another visitor.
     function populateGF() {
         trackers.forEach(function (t) {
-            var stored = getCookie(t.param) || '';
+            var stored = getCookie(t) || '';
             document.querySelectorAll('input[data-trace-param="' + t.param + '"]').forEach(function (el) {
                 // Clear cached server-rendered values when this visitor has no cookie.
                 el.value = stored;
             });
         });
     }
-    document.addEventListener('DOMContentLoaded', populateGF);
-    document.addEventListener('gform_post_render', populateGF);
+    onReady(function () {
+        populateGF();
+        // GF fires gform_post_render through jQuery, which a native listener never sees.
+        if (window.jQuery) window.jQuery(document).on('gform_post_render', populateGF);
+    });
+    // Native equivalent, GF 2.9+.
+    document.addEventListener('gform/post_render', populateGF);
 
 <?php if ( ! empty( $hl['enabled'] ) ) : ?>
     // Append tracked params to HighLevel iframes.
@@ -524,7 +584,7 @@ function trace_ids_script() {
         var parts = [];
         trackers.forEach(function (t) {
             if (src.indexOf(t.param + '=') !== -1) return;
-            var val = getCookie(t.param);
+            var val = getCookie(t);
             if (val) parts.push(encodeURIComponent(t.param) + '=' + encodeURIComponent(val));
         });
         if (!parts.length) return;
@@ -535,7 +595,7 @@ function trace_ids_script() {
         document.querySelectorAll('iframe').forEach(injectHL);
     }
 
-    document.addEventListener('DOMContentLoaded', processHL);
+    onReady(processHL);
 
     // Catch iframes injected after page load (page builders, lazy rendering)
     var hlObserver = new MutationObserver(function (mutations) {
