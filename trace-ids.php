@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Trace IDs
  * Description:  Captures click IDs (GCLID, fbclid) from URL, stores in cookies, populates Gravity Forms hidden fields, and appends parameters to HighLevel iframes — resilient to page and object caching.
- * Version:      1.5.3
+ * Version:      1.6.0
  * Requires PHP: 7.4
  * Requires at least: 5.8
  * Author:       LifeX Marketing
@@ -12,9 +12,14 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'TRACE_IDS_VERSION', '1.5.3' );
+define( 'TRACE_IDS_VERSION', '1.6.0' );
 define( 'TRACE_IDS_PLUGIN_FILE', plugin_basename( __FILE__ ) );
 define( 'TRACE_IDS_REPO', 'lifexmarketing/trace-ids' );
+
+// Shared LifeX privacy-signal helper (Global Privacy Control + Do Not Track).
+// Guarded with function_exists, so it coexists with the standalone
+// "LifeX Tracking Opt-Out Helper" plugin.
+require_once __DIR__ . '/includes/is-tracking-opt-out.php';
 
 // --- Settings ---
 
@@ -149,6 +154,13 @@ function trace_ids_settings_page() {
                     </td>
                 </tr>
             </table>
+
+            <h2>Privacy Signals</h2>
+            <p class="description">
+                Visitors who send Global Privacy Control or Do Not Track are not tracked: click IDs are not stored,
+                Trace IDs cookies already set are removed, Gravity Forms click ID fields are submitted blank, and
+                nothing is appended to HighLevel iframes. Their forms still submit normally.
+            </p>
 
             <?php submit_button(); ?>
         </form>
@@ -410,6 +422,7 @@ function trace_ids_init() {
     if ( empty( $enabled ) ) return;
 
     if ( ! is_admin() ) {
+        add_action( 'wp_head', 'trace_ids_opt_out_helper_script', 0 );
         add_action( 'wp_head', 'trace_ids_script', 1 );
     }
 
@@ -439,8 +452,8 @@ function trace_ids_cookie_value( $param ) {
     return '';
 }
 
-// Submissions are never page-cached, so the submitter's own cookies are safe
-// to read here. Only fills fields the browser script left empty.
+// Submissions are never page-cached, so the submitter's own cookies and request
+// headers are safe to read here. Only fills fields the browser script left empty.
 function trace_ids_fill_from_cookies( $form ) {
     $s      = trace_ids_settings();
     $params = [];
@@ -449,10 +462,17 @@ function trace_ids_fill_from_cookies( $form ) {
         $params[] = $tracker['param'];
     }
 
+    // Privacy signal present: blank the click ID fields but let the lead through.
+    $opted_out = \LifeX\Privacy\isTrackingOptOut();
+
     foreach ( $form['fields'] as $field ) {
         if ( empty( $field->inputName ) || ! in_array( $field->inputName, $params, true ) ) continue;
 
         $input = 'input_' . $field->id;
+        if ( $opted_out ) {
+            $_POST[ $input ] = '';
+            continue;
+        }
         if ( isset( $_POST[ $input ] ) && $_POST[ $input ] !== '' ) continue;
 
         $value = trace_ids_cookie_value( $field->inputName );
@@ -477,6 +497,12 @@ function trace_ids_inject_data_attr( $content, $field ) {
         $content,
         1
     );
+}
+
+// Prints window.isTrackingOptOut() as early as possible in <head>. Gating happens
+// in the browser because page HTML may be cached and shared between visitors.
+function trace_ids_opt_out_helper_script() {
+    readfile( __DIR__ . '/includes/is-tracking-opt-out.inline.html' );
 }
 
 function trace_ids_script() {
@@ -525,8 +551,18 @@ function trace_ids_script() {
         else fn();
     }
 
-    // Capture URL params into cookies
+    function deleteCookie(name) {
+        document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax';
+    }
+    // GPC / DNT: window.isTrackingOptOut() is printed at wp_head priority 0.
+    // It is called on every use, never cached, since a visitor can change the
+    // setting mid-session.
+
+    // Capture URL params into cookies. With a privacy signal, store nothing and
+    // remove Trace IDs cookies set on earlier visits. The legacy unprefixed
+    // cookie is left alone because other plugins (e.g. HandL) may own it.
     trackers.forEach(function (t) {
+        if (typeof window.isTrackingOptOut === 'function' && window.isTrackingOptOut()) { deleteCookie(t.cookie); return; }
         var val = getParam(t.param);
         if (val) setCookie(t.cookie, val, t.expiry);
     });
@@ -534,8 +570,9 @@ function trace_ids_script() {
     // Populate Gravity Forms hidden fields. Always writes, even when empty, so
     // a value baked into cached HTML is never submitted by another visitor.
     function populateGF() {
+        var optedOut = (typeof window.isTrackingOptOut === 'function' && window.isTrackingOptOut());
         trackers.forEach(function (t) {
-            var stored = getCookie(t) || '';
+            var stored = optedOut ? '' : (getCookie(t) || '');
             document.querySelectorAll('input[data-trace-param="' + t.param + '"]').forEach(function (el) {
                 // Clear cached server-rendered values when this visitor has no cookie.
                 el.value = stored;
@@ -578,6 +615,7 @@ function trace_ids_script() {
 
     function injectHL(el) {
         if (el.tagName !== 'IFRAME') return;
+        if (typeof window.isTrackingOptOut === 'function' && window.isTrackingOptOut()) return;
         var attr = getHLAttr(el);
         if (!attr) return;
         var src  = el.getAttribute(attr);

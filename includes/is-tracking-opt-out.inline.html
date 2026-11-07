@@ -1,0 +1,18 @@
+<!-- LifeX privacy-signal helper. Keep this as the FIRST script in <head>, before any tag that could use it. -->
+<script>
+(function () {
+  if (typeof window.isTrackingOptOut === 'function') return;
+  window.isTrackingOptOut = function isTrackingOptOut() {
+    try {
+      if (navigator.globalPrivacyControl === true) return true;
+      var dnt = [navigator.doNotTrack, window.doNotTrack, navigator.msDoNotTrack];
+      for (var i = 0; i < dnt.length; i++) {
+        if (dnt[i] === '1' || dnt[i] === 1 || dnt[i] === 'yes') return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  };
+})();
+</script>

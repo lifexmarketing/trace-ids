@@ -16,6 +16,7 @@ jobs:
         run: |
           mkdir -p build/trace-ids
           cp trace-ids.php build/trace-ids/
+          cp -r includes build/trace-ids/
           cd build
           zip -r trace-ids.zip trace-ids/
 
